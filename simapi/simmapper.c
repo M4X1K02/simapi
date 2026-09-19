@@ -543,6 +543,7 @@ static int set_sim_info(SimInfo* si)
             si->SimSupportsTyreEffects = true;
             si->SimSupportsRealtimeTelemetry = true;
             si->SimSupportsHapticEffects = true;
+            si->SimCalculatesSlipRatio = true;
             si->SimSupportsAdvancedUI = false;
             break;
         case SIMULATORAPI_F1_2018:
@@ -1030,7 +1031,7 @@ SimInfo simapi_get_sim(SimData* simdata, SimMap* simmap, bool force_udp, int (*s
             break;
         case SIMULATOREXE_DIRT_RALLY_2:
             simapi_log(SIMAPI_LOGLEVEL_DEBUG, "Found running process for DiRT Rally 2.0");
-            int dr2_error = (*setup_udp)(20777);
+            int dr2_error = (*setup_udp)(DIRT_RALLY_2_UDP_PORT);
             if (dr2_error == 0)
             {
                 dr2_error = simapi_initudp(simdata, simmap, SIMULATORAPI_DIRT_RALLY_2);

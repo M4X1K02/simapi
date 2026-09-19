@@ -14,10 +14,36 @@
 #include "../simmapper.h"
 
 #define DR2_RPM_SCALE 10.0f
+#define DR2_MS_TO_KMH 3.6f
+#define DR2_MIN_CHASSIS_SPEED_MS 0.5
+#define DR2_WHEEL_COUNT 4
+#define DR2_WHEEL_FL 0
+#define DR2_WHEEL_FR 1
+#define DR2_WHEEL_RL 2
+#define DR2_WHEEL_RR 3
+#define DR2_CAR_NAME "DR2"
+#define DR2_CAR_NAME_SIZE 4
 
 static int froundint(float f)
 {
     return (int)trunc(nearbyint(f));
+}
+
+static double vector_dot(float ax, float ay, float az, float bx, float by, float bz)
+{
+    return (double)ax * (double)bx
+         + (double)ay * (double)by
+         + (double)az * (double)bz;
+}
+
+static double longitudinal_slip_ratio(double chassis_speed_ms, double wheel_speed_ms)
+{
+    if (chassis_speed_ms <= DR2_MIN_CHASSIS_SPEED_MS)
+    {
+        return 0.0;
+    }
+
+    return (chassis_speed_ms - wheel_speed_ms) / chassis_speed_ms;
 }
 
 /**
@@ -33,8 +59,8 @@ static int froundint(float f)
  * - Gear: Shifted by +1 to match SimAPI range (0=R, 1=N, 2=1st...).
  * - Euler Angles: Derived from the Forward and Right vectors provided in the
  * UDP packet.
- * - G-Forces: Lateral (X) and Longitudinal (Y) are provided directly by the
- * game.
+ * - Local velocity: derived from world velocity dotted with the car axes.
+ * - Wheel slip: chassis speed vs per-wheel linear speed (UDP is m/s, not rad/s).
  *
  * @param simdata The target SimData structure to populate.
  * @param simmap The simulator mapping context.
@@ -55,7 +81,7 @@ void map_dirt_rally_2_data(SimData *simdata, SimMap *simmap, char* base)
 
         // Basic telemetry
         simdata->rpms = froundint(packet->fields.engineRPM * DR2_RPM_SCALE);
-        simdata->velocity = froundint(packet->fields.speed * 3.6f); // m/s to km/h
+        simdata->velocity = froundint(packet->fields.speed * DR2_MS_TO_KMH);
 
         // Gear mapping: game(-1..10) -> simapi(0..11)
         float raw_gear = packet->fields.gear;
@@ -92,6 +118,7 @@ void map_dirt_rally_2_data(SimData *simdata, SimMap *simmap, char* base)
         simdata->steer = (double)packet->fields.steering;
         simdata->brake = (double)packet->fields.brake;
         simdata->clutch = (double)packet->fields.clutch;
+        simdata->abs = (double)packet->fields.antiLockBrakes;
 
         // World Velocities
         simdata->worldXvelocity = (double)packet->fields.velX;
@@ -112,12 +139,15 @@ void map_dirt_rally_2_data(SimData *simdata, SimMap *simmap, char* base)
         float uy = fz * rx - fx * rz;
         float uz = fx * ry - fy * rx;
 
-        // G-Forces / Accelerations
-        // Lateral and Longitudinal are provided directly by the game.
-        simdata->Xvelocity = (double)packet->fields.gForceLat;
-        simdata->Yvelocity = (double)packet->fields.gForceLon;
-        simdata->Zvelocity =
-            0.0; // Vertical G-force not explicitly provided in 66-float struct
+        /* Local velocity (m/s), Assetto Corsa convention: X lateral, Y forward.
+         * Leave Z at 0: the packet has no vertical g-force, and projecting
+         * world-up into Zvelocity trips 1 m/s airborne gates on rally bumps.
+         */
+        simdata->Xvelocity = vector_dot(packet->fields.velX, packet->fields.velY,
+                                        packet->fields.velZ, rx, ry, rz);
+        simdata->Yvelocity = vector_dot(packet->fields.velX, packet->fields.velY,
+                                        packet->fields.velZ, fx, fy, fz);
+        simdata->Zvelocity = 0.0;
 
         // Store vectors in SimData for legacy support or debugging
         simdata->tyrecontact0[0] = (double)rx;
@@ -141,11 +171,32 @@ void map_dirt_rally_2_data(SimData *simdata, SimMap *simmap, char* base)
         // 3. Roll (Right side down +)
         simdata->roll = atan2((double)-ry, (double)uy) * (180.0 / M_PI);
 
-        // Wheel Speeds (m/s)
-        simdata->tyreRPS[0] = (double)packet->fields.wheelSpeedRL;
-        simdata->tyreRPS[1] = (double)packet->fields.wheelSpeedRR;
-        simdata->tyreRPS[2] = (double)packet->fields.wheelSpeedFL;
-        simdata->tyreRPS[3] = (double)packet->fields.wheelSpeedFR;
+        // Wheel linear speeds from the UDP packet are m/s, while tyreRPS is rad/s.
+        // Store slip from chassis vs wheel linear speed so haptics do not need a tyre diameter.
+        const double chassis_speed_ms = (double)packet->fields.speed;
+        const double wheel_speed_ms[DR2_WHEEL_COUNT] = {
+            [DR2_WHEEL_FL] = (double)packet->fields.wheelSpeedFL,
+            [DR2_WHEEL_FR] = (double)packet->fields.wheelSpeedFR,
+            [DR2_WHEEL_RL] = (double)packet->fields.wheelSpeedRL,
+            [DR2_WHEEL_RR] = (double)packet->fields.wheelSpeedRR,
+        };
+
+        simdata->tyreRPS[DR2_WHEEL_FL] = 0.0;
+        simdata->tyreRPS[DR2_WHEEL_FR] = 0.0;
+        simdata->tyreRPS[DR2_WHEEL_RL] = 0.0;
+        simdata->tyreRPS[DR2_WHEEL_RR] = 0.0;
+        simdata->tyreslipratio[DR2_WHEEL_FL] =
+            longitudinal_slip_ratio(chassis_speed_ms, wheel_speed_ms[DR2_WHEEL_FL]);
+        simdata->tyreslipratio[DR2_WHEEL_FR] =
+            longitudinal_slip_ratio(chassis_speed_ms, wheel_speed_ms[DR2_WHEEL_FR]);
+        simdata->tyreslipratio[DR2_WHEEL_RL] =
+            longitudinal_slip_ratio(chassis_speed_ms, wheel_speed_ms[DR2_WHEEL_RL]);
+        simdata->tyreslipratio[DR2_WHEEL_RR] =
+            longitudinal_slip_ratio(chassis_speed_ms, wheel_speed_ms[DR2_WHEEL_RR]);
+        simdata->tyreslipangle[DR2_WHEEL_FL] = 0.0;
+        simdata->tyreslipangle[DR2_WHEEL_FR] = 0.0;
+        simdata->tyreslipangle[DR2_WHEEL_RL] = 0.0;
+        simdata->tyreslipangle[DR2_WHEEL_RR] = 0.0;
 
         // Game Status
         // DiRT Rally 2.0 extradata=3 is typically only sent when the simulation is
@@ -174,27 +225,25 @@ void map_dirt_rally_2_data(SimData *simdata, SimMap *simmap, char* base)
         simdata->fuel = (double)packet->fields.fuelInTank;
 
         // Brake Temperatures
-        simdata->braketemp[0] = (double)packet->fields.brakesTempRL;
-        simdata->braketemp[1] = (double)packet->fields.brakesTempRR;
-        simdata->braketemp[2] = (double)packet->fields.brakesTempFL;
-        simdata->braketemp[3] = (double)packet->fields.brakesTempFR;
+        simdata->braketemp[DR2_WHEEL_FL] = (double)packet->fields.brakesTempFL;
+        simdata->braketemp[DR2_WHEEL_FR] = (double)packet->fields.brakesTempFR;
+        simdata->braketemp[DR2_WHEEL_RL] = (double)packet->fields.brakesTempRL;
+        simdata->braketemp[DR2_WHEEL_RR] = (double)packet->fields.brakesTempRR;
 
-        // Tyre Pressures
-        simdata->tyrepressure[0] = (double)packet->fields.tyrePressureRL;
-        simdata->tyrepressure[1] = (double)packet->fields.tyrePressureRR;
-        simdata->tyrepressure[2] = (double)packet->fields.tyrePressureFL;
-        simdata->tyrepressure[3] = (double)packet->fields.tyrePressureFR;
+        simdata->tyrepressure[DR2_WHEEL_FL] = (double)packet->fields.tyrePressureFL;
+        simdata->tyrepressure[DR2_WHEEL_FR] = (double)packet->fields.tyrePressureFR;
+        simdata->tyrepressure[DR2_WHEEL_RL] = (double)packet->fields.tyrePressureRL;
+        simdata->tyrepressure[DR2_WHEEL_RR] = (double)packet->fields.tyrePressureRR;
 
-        // Suspension positions
-        simdata->suspension[0] = (double)packet->fields.suspRL;
-        simdata->suspension[1] = (double)packet->fields.suspRR;
-        simdata->suspension[2] = (double)packet->fields.suspFL;
-        simdata->suspension[3] = (double)packet->fields.suspFR;
+        simdata->suspension[DR2_WHEEL_FL] = (double)packet->fields.suspFL;
+        simdata->suspension[DR2_WHEEL_FR] = (double)packet->fields.suspFR;
+        simdata->suspension[DR2_WHEEL_RL] = (double)packet->fields.suspRL;
+        simdata->suspension[DR2_WHEEL_RR] = (double)packet->fields.suspRR;
 
-        simdata->suspvelocity[0] = (double)packet->fields.suspVelRL;
-        simdata->suspvelocity[1] = (double)packet->fields.suspVelRR;
-        simdata->suspvelocity[2] = (double)packet->fields.suspVelFL;
-        simdata->suspvelocity[3] = (double)packet->fields.suspVelFR;
+        simdata->suspvelocity[DR2_WHEEL_FL] = (double)packet->fields.suspVelFL;
+        simdata->suspvelocity[DR2_WHEEL_FR] = (double)packet->fields.suspVelFR;
+        simdata->suspvelocity[DR2_WHEEL_RL] = (double)packet->fields.suspVelRL;
+        simdata->suspvelocity[DR2_WHEEL_RR] = (double)packet->fields.suspVelRR;
 
         simdata->distance = (double)packet->fields.distance;
         simdata->position = (uint32_t)packet->fields.racePos;
@@ -228,6 +277,6 @@ void map_dirt_rally_2_data(SimData *simdata, SimMap *simmap, char* base)
                                                 floor(packet->fields.lastLapTime)) *
                                                1000);
 
-        strncpy(simdata->car, "DR2", 4);
+        strncpy(simdata->car, DR2_CAR_NAME, DR2_CAR_NAME_SIZE);
     }
 }
