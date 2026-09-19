@@ -139,15 +139,14 @@ void map_dirt_rally_2_data(SimData *simdata, SimMap *simmap, char* base)
         float uy = fz * rx - fx * rz;
         float uz = fx * ry - fy * rx;
 
-        /* Local velocity (m/s), Assetto Corsa convention: X lateral, Y forward.
-         * Leave Z at 0: the packet has no vertical g-force, and projecting
-         * world-up into Zvelocity trips 1 m/s airborne gates on rally bumps.
-         */
+        // Local velocity (m/s). SimData X/Y/Z velocity matches Assetto Corsa:
+        // lateral, forward, vertical. Monocoque haptic gating uses this, not G-force.
         simdata->Xvelocity = vector_dot(packet->fields.velX, packet->fields.velY,
                                         packet->fields.velZ, rx, ry, rz);
         simdata->Yvelocity = vector_dot(packet->fields.velX, packet->fields.velY,
                                         packet->fields.velZ, fx, fy, fz);
-        simdata->Zvelocity = 0.0;
+        simdata->Zvelocity = vector_dot(packet->fields.velX, packet->fields.velY,
+                                        packet->fields.velZ, ux, uy, uz);
 
         // Store vectors in SimData for legacy support or debugging
         simdata->tyrecontact0[0] = (double)rx;
