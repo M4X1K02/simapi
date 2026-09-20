@@ -9,6 +9,7 @@
 #include "loopdata.h"
 
 int loadconfig(SimdSettings simds, int compat_info_size, GameCompatInfo* game_compat_info);
+int load_udp_forward(const char* config_file, SimdSettings* simds);
 
 int getNumberOfConfigs(const char* config_file_str);
 

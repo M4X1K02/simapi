@@ -1,9 +1,23 @@
 #ifndef _LOOPDATA_H
 #define _LOOPDATA_H
 
+#include <netinet/in.h>
+#include <stdint.h>
+
 #include <uv.h>
 #include <simdata.h>
 #include <simmapper.h>
+
+#define UDP_FORWARD_MAX 8
+#define UDP_FORWARD_IP_LEN 16
+
+typedef struct
+{
+    char ip[UDP_FORWARD_IP_LEN];
+    uint16_t port;
+    struct sockaddr_in dest;
+}
+UdpForwardTarget;
 
 typedef struct
 {
@@ -30,6 +44,8 @@ typedef struct
     char* configfile;
     char* pokesetting;
     char* targetvalue;
+    UdpForwardTarget udp_forward[UDP_FORWARD_MAX];
+    int udp_forward_count;
 }
 SimdSettings;
 
