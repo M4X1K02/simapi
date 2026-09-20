@@ -1,3 +1,6 @@
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +57,7 @@ uv_timer_t bridgeclosetimer;
 uv_udp_t recv_socket;
 bool recv_socket_initialized = false;
 bool recv_socket_bound = false;
+static int udp_listen_port = 0;
 
 int appstate = 0;
 int compat_info_size = 0;
@@ -124,6 +128,7 @@ int set_settings(Parameters* p, SimdSettings* simds)
         simds->targetvalue = strdup(p->targetvalue);
     }
     fprintf(stderr, "starting simd\n");
+    simds->udp_forward_count = 0;
 }
 
 static void close_walk_cb(uv_handle_t* handle, void* arg)
@@ -276,6 +281,50 @@ void on_alloc(uv_handle_t* client, size_t suggested_size, uv_buf_t* buf)
     bzero(buf->base, suggested_size);
 }
 
+static bool udp_forward_is_self(const UdpForwardTarget* target)
+{
+    if (target == NULL || udp_listen_port <= 0)
+    {
+        return false;
+    }
+    if (ntohs(target->dest.sin_port) != (uint16_t)udp_listen_port)
+    {
+        return false;
+    }
+    uint32_t addr = ntohl(target->dest.sin_addr.s_addr);
+    return addr == INADDR_LOOPBACK || addr == INADDR_ANY;
+}
+
+static void forward_udp_packet(const char* data, size_t len)
+{
+    if (simds.udp_forward_count <= 0 || data == NULL || len == 0)
+    {
+        return;
+    }
+    if (!recv_socket_bound)
+    {
+        return;
+    }
+
+    uv_buf_t buf = uv_buf_init((char*)data, (unsigned int)len);
+    int i = 0;
+    while (i < simds.udp_forward_count)
+    {
+        const UdpForwardTarget* target = &simds.udp_forward[i];
+        i++;
+        if (udp_forward_is_self(target))
+        {
+            continue;
+        }
+        int err = uv_udp_try_send(&recv_socket, &buf, 1, (const struct sockaddr*)&target->dest);
+        if (err < 0)
+        {
+            y_log_message(Y_LOG_LEVEL_DEBUG, "udp forward to %s:%u failed: %s",
+                          target->ip, (unsigned)target->port, uv_strerror(err));
+        }
+    }
+}
+
 static void on_udp_recv(uv_udp_t* handle, ssize_t nread, const uv_buf_t* rcvbuf, const struct sockaddr* addr, unsigned flags)
 {
     if (nread <= 0)
@@ -304,6 +353,8 @@ static void on_udp_recv(uv_udp_t* handle, ssize_t nread, const uv_buf_t* rcvbuf,
     {
         y_log_message(Y_LOG_LEVEL_DEBUG, "UDP packet received but appstate is %d (expected 2)", appstate);
     }
+
+    forward_udp_packet(a, (size_t)nread);
 
     /*
      * Relaxed shutdown condition: only stop mapping if explicitly requested
@@ -345,6 +396,7 @@ int startudp(int port)
     if (err == 0)
     {
         recv_socket_bound = true;
+        udp_listen_port = port;
     }
 
     return err;
@@ -842,6 +894,11 @@ int main(int argc, char** argv)
         game_compat_info = malloc(compat_info_size * sizeof(GameCompatInfo));
 
         loadconfig(simds, compat_info_size, game_compat_info);
+        load_udp_forward(simds.configfile, &simds);
+        if (simds.udp_forward_count > 0)
+        {
+            y_log_message(Y_LOG_LEVEL_INFO, "UDP fan-out enabled for %d destination(s)", simds.udp_forward_count);
+        }
 
         y_log_message(Y_LOG_LEVEL_INFO, "Successfullly loaded configuration file");
     }

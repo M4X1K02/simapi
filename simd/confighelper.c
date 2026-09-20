@@ -1,9 +1,17 @@
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
-
+#include <arpa/inet.h>
 
 #include "confighelper.h"
+
+static const char UDP_FORWARD_KEY[] = "udp_forward";
+static const char UDP_FORWARD_KEY_IP[] = "ip";
+static const char UDP_FORWARD_KEY_PORT[] = "port";
+static const char UDP_FORWARD_DEFAULT_IP[] = "127.0.0.1";
+static const int UDP_PORT_MIN = 1;
+static const int UDP_PORT_MAX = 65535;
 
 
 //int strcicmp(char const *a, char const *b)
@@ -108,5 +116,89 @@ int loadconfig(SimdSettings simds, int compat_info_size, GameCompatInfo* gc)
 
     config_destroy(&cfg);
 
+    return 0;
+}
+
+static int parse_forward_target(config_setting_t* item, UdpForwardTarget* out)
+{
+    if (item == NULL || out == NULL)
+    {
+        return -1;
+    }
+    if (!config_setting_is_group(item))
+    {
+        return -1;
+    }
+
+    int port = 0;
+    if (config_setting_lookup_int(item, UDP_FORWARD_KEY_PORT, &port) == CONFIG_FALSE)
+    {
+        return -1;
+    }
+    if (port < UDP_PORT_MIN || port > UDP_PORT_MAX)
+    {
+        return -1;
+    }
+
+    const char* ip = UDP_FORWARD_DEFAULT_IP;
+    config_setting_lookup_string(item, UDP_FORWARD_KEY_IP, &ip);
+    if (ip == NULL || ip[0] == '\0')
+    {
+        return -1;
+    }
+    if (strlen(ip) >= UDP_FORWARD_IP_LEN)
+    {
+        return -1;
+    }
+
+    memset(out, 0, sizeof(*out));
+    if (inet_pton(AF_INET, ip, &out->dest.sin_addr) != 1)
+    {
+        return -1;
+    }
+    out->dest.sin_family = AF_INET;
+    out->dest.sin_port = htons((uint16_t)port);
+    memcpy(out->ip, ip, strlen(ip) + 1);
+    out->port = (uint16_t)port;
+    return 0;
+}
+
+int load_udp_forward(const char* config_file, SimdSettings* simds)
+{
+    if (config_file == NULL || simds == NULL)
+    {
+        return -1;
+    }
+
+    simds->udp_forward_count = 0;
+    config_t cfg;
+    config_init(&cfg);
+    if (!config_read_file(&cfg, config_file))
+    {
+        config_destroy(&cfg);
+        return -1;
+    }
+
+    config_setting_t* list = config_lookup(&cfg, UDP_FORWARD_KEY);
+    if (list == NULL || !config_setting_is_list(list))
+    {
+        config_destroy(&cfg);
+        return 0;
+    }
+
+    int count = config_setting_length(list);
+    int i = 0;
+    while (i < count && simds->udp_forward_count < UDP_FORWARD_MAX)
+    {
+        UdpForwardTarget target;
+        if (parse_forward_target(config_setting_get_elem(list, i), &target) == 0)
+        {
+            simds->udp_forward[simds->udp_forward_count] = target;
+            simds->udp_forward_count++;
+        }
+        i++;
+    }
+
+    config_destroy(&cfg);
     return 0;
 }
